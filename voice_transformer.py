@@ -3,15 +3,17 @@
 
 Usage (shared venv, see README):
     uv sync                                  # one-time setup
-    uv run voice_transformer.py --record 5 --voice Rachel --mock --play
-    uv run voice_transformer.py --input myvoice.wav --voice Clyde --output out.mp3
+    uv run voice_transformer.py --check      # key, plan, credits, voice check (free, read-only)
+    uv run voice_transformer.py --record 5 --voice george --mock --play
+    uv run voice_transformer.py --input myvoice.wav --voice sarah --output out.mp3
     uv run voice_transformer.py --list-voices
-    uv run voice_transformer.py --record 5 --voice Rachel   # real ElevenLabs STS (needs key)
+    uv run voice_transformer.py --record 5 --voice george   # real ElevenLabs STS (needs key)
 
-Free-tier note: stock voices (Rachel, Clyde, …) are blocked via API on free
-accounts. Clone a voice once (allowed on free tier), then use its voice_id:
-    uv run voice_transformer.py --clone-voice myfriend --clone-samples friend1.mp3
-    uv run voice_transformer.py --input media/audio_sophisticated.ogg --voice <voice_id>
+Free-tier note: only current built-in default voices (premade: George, Sarah)
+and your own Voice Design voices (generated) work via API on free accounts.
+Legacy/library voices (Rachel, Clyde, Bella, …) return "library voices" errors.
+Generate custom voices at elevenlabs.io → Voices → Voice Design, then pass
+--voice <voice_id>.
 
 Input:  mic (--record SECS) or existing file (--input FILE).
 Output: converted audio (--output FILE) + optional playback (--play, default on).
@@ -41,21 +43,19 @@ import wave
 from pathlib import Path
 
 # --------------------------------------------------------------------------
-# Known ElevenLabs stock voice IDs (stable public IDs, free tier can use them).
-# User can also pass a raw voice_id directly.
+# Voices verified to work via API on the ElevenLabs free plan:
+# current built-in defaults (category "premade"). Anything from the Voice
+# Library — including legacy defaults like Rachel/Clyde/Bella — is blocked
+# on free ("Free users cannot use library voices via the API").
+# Own Voice Design voices (category "generated") also work: pass the raw ID.
 # --------------------------------------------------------------------------
 VOICES = {
-    "rachel": "21m00Tcm4TlvDq8ikWAM",   # warm female narration
-    "clyde": "2EiwWnXFnvU5JabPnv8n",     # middle-aged male
-    "domi": "AZnzlk1XvdvUeBnXmlld",      # strong female
-    "bella": "EXAVITQu4vr4xnSDQMaL",     # soft female
-    "antoni": "ErXwobaYiN019PkySvjV",    # well-rounded male
-    "elli": "MF3mGyEYCl7XYWbV9V6O",      # emotional female
-    "josh": "TxGEqnHWrfWFTfGW9XjX",      # deep young male
-    "arnold": "VR6AewLTigWG4xSOl13",     # crisp middle-aged male
-    "adam": "pNInz6obpgDQGcFmaJgB",      # deep narration male
-    "sam": "yoZ06aMxZJJt9JmdXNzT",       # raspy young male
+    "george": "JBFqnCBsd6RMkjVDRZzb",  # deeper built-in default (premade)
+    "sarah": "EXAVITQu4vr4xnSDxMaL",   # brighter built-in default (premade)
 }
+
+DEFAULT_MODEL = "eleven_multilingual_sts_v2"
+DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
 
 API_BASE = "https://api.elevenlabs.io/v1"
 
@@ -260,21 +260,13 @@ def _multipart_body(fields: dict, files: list[tuple[str, Path, str]],
 
 
 def sts_convert(src: Path, voice_id: str, api_key: str,
-                model_id: str = "eleven_english_sts_v2") -> bytes:
+                model_id: str = DEFAULT_MODEL,
+                output_format: str = DEFAULT_OUTPUT_FORMAT) -> bytes:
     boundary = "----voicetransformer boundary"
-    with open(src, "rb") as f:
-        audio = f.read()
-    fname = Path(src).name or "audio.wav"
-    body = (
-        f"--{boundary}\r\n".encode()
-        + f'Content-Disposition: form-data; name="model_id"\r\n\r\n{model_id}\r\n'.encode()
-        + f"--{boundary}\r\n".encode()
-        + f'Content-Disposition: form-data; name="audio"; filename="{fname}"\r\n'
-          f"Content-Type: audio/wav\r\n\r\n".encode()
-        + audio + f"\r\n--{boundary}--\r\n".encode()
-    )
+    body = _multipart_body({"model_id": model_id},
+                           [("audio", Path(src), "audio/wav")], boundary)
     req = urllib.request.Request(
-        f"{API_BASE}/speech-to-speech/{voice_id}",
+        f"{API_BASE}/speech-to-speech/{voice_id}?output_format={output_format}",
         data=body,
         headers={"xi-api-key": api_key,
                  "Content-Type": f"multipart/form-data; boundary={boundary}"},
@@ -295,83 +287,100 @@ def sts_convert(src: Path, voice_id: str, api_key: str,
                 pass
         except Exception:
             detail = str(e)
-        if "library voices" in detail.lower() or "not available for free" in detail.lower():
+        if "library voices" in detail.lower() or "not available for free" in detail.lower() \
+                or "paid_plan_required" in detail.lower():
             raise SystemExit(
                 f"ElevenLabs STS failed: {detail}\n\n"
-                "Free-tier keys cannot use stock/library voices (Rachel, Clyde, …) via API.\n"
-                "Workaround — clone a voice (allowed on free tier, usable via API):\n"
-                "  1. get 1-3 min of clear single-speaker speech (with their permission)\n"
-                "  2. uv run voice_transformer.py --clone-voice myfriend "
-                "--clone-samples friend1.mp3 [friend2.mp3 ...]\n"
-                "  3. use the printed voice_id with --voice, e.g.:\n"
-                "       uv run voice_transformer.py --input media/audio_sophisticated.ogg "
-                "--voice <voice_id> --output voice_out.mp3\n"
+                "That voice is a Voice Library voice — free-tier keys cannot use "
+                "those via API (Rachel, Clyde, Bella, … are all library voices).\n"
+                "Use a voice the free plan allows instead:\n"
+                "  --voice george   (built-in default, deeper)\n"
+                "  --voice sarah    (built-in default, brighter)\n"
+                "  --voice <voice_id> of your own Voice Design voice "
+                "(elevenlabs.io → Voices → Voice Design)\n"
+                "Run --check to see which voices your key can use.\n"
                 "Or demo offline now: add --mock."
             )
         raise SystemExit(f"ElevenLabs STS failed: {detail or e}\n"
                          "Tip: check key/quota, or retry with --mock.")
 
 
-def clone_voice(name: str, samples: list[Path], api_key: str,
-                description: str = "") -> str:
-    """Create an Instant Voice Clone from 1+ sample files. Returns voice_id.
-
-    Needs ~1-3 min total of clear single-speaker speech (wav/mp3/m4a/ogg —
-    converted to 16kHz mono wav first). Works on the free tier; the returned
-    voice_id IS usable via API (unlike stock library voices).
-    """
+def api_get(path: str, api_key: str, timeout: int = 30):
+    """GET an ElevenLabs API endpoint, return parsed JSON (or exit with reason)."""
     import json
-
-    conv: list[Path] = []
-    tmpdir = Path(tempfile.mkdtemp(prefix="voice_clone_"))
-    for s in samples:
-        if not s.exists():
-            raise SystemExit(f"Sample not found: {s}")
-        dst = tmpdir / (s.stem + ".wav")
-        if s.suffix.lower() == ".wav":
-            shutil.copy(s, dst)
-        elif have("ffmpeg"):
-            r = subprocess.run(["ffmpeg", "-y", "-i", str(s),
-                                "-ar", "16000", "-ac", "1", str(dst)],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                raise SystemExit(f"ffmpeg could not decode sample {s}")
-        else:
-            raise SystemExit(f"{s} is not .wav and ffmpeg is missing.")
-        conv.append(dst)
-
-    boundary = "----voicetransformer clone"
-    body = _multipart_body({"name": name, "description": description},
-                           [("files", p, "audio/wav") for p in conv], boundary)
-    req = urllib.request.Request(
-        f"{API_BASE}/voices/add",
-        data=body,
-        headers={"xi-api-key": api_key,
-                 "Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
+    req = urllib.request.Request(f"{API_BASE}{path}",
+                                 headers={"xi-api-key": api_key})
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            data = json.loads(r.read().decode())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
     except Exception as e:
         try:
-            err = e.read().decode()  # type: ignore[attr-defined]
+            err = json.loads(e.read().decode())  # type: ignore[attr-defined]
+            msg = err.get("detail", {}).get("message", str(err))
         except Exception:
-            err = str(e)
-        raise SystemExit(f"Voice cloning failed: {err}")
-    vid = data.get("voice_id", "")
-    if not vid:
-        raise SystemExit(f"Voice cloning failed: unexpected response {data}")
-    return vid
+            msg = str(e)
+        raise SystemExit(f"ElevenLabs API {path} failed: {msg}")
 
 
-def save_cloned_voice_env(voice_id: str, path: Path = Path(".env")) -> None:
-    """Persist CLONED_VOICE_ID so later runs can default to it."""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    lines = [l for l in lines if not l.strip().startswith("CLONED_VOICE_ID=")]
-    lines.append(f"CLONED_VOICE_ID={voice_id}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"[clone] saved CLONED_VOICE_ID to {path}")
+def cmd_check(api_key: str) -> None:
+    """Read-only config diagnosis: plan, credits, model, per-voice usability."""
+    if not api_key:
+        print("No API key. Set ELEVENLABS_API_KEY in .env (see .env.example).")
+        return
+    me = api_get("/user", api_key)
+    sub = me.get("subscription", {}) if isinstance(me, dict) else {}
+    tier = sub.get("tier", "?")
+    used = sub.get("character_count", "?")
+    limit = sub.get("character_limit", "?")
+    print(f"Plan: {tier} | credits used: {used} / {limit}")
+
+    models = api_get("/models", api_key)
+    model_ids = {m.get("model_id") for m in models} if isinstance(models, list) else set()
+    print(f"Model {DEFAULT_MODEL}: "
+          f"{'available' if DEFAULT_MODEL in model_ids else 'NOT listed'}")
+
+    data = api_get("/voices", api_key)
+    by_id = {v.get("voice_id"): v for v in data.get("voices", [])}
+    print("Configured voices:")
+    for name, vid in VOICES.items():
+        v = by_id.get(vid)
+        if v is None:
+            print(f"  {name} ({vid}): NOT visible to this key")
+            continue
+        cat = v.get("category", "?")
+        usable = "OK (premade/generated)" if cat in ("premade", "generated") else \
+            "BLOCKED on free (library voice)"
+        print(f"  {name} ({vid}): {v.get('name', '?')} [{cat}] — {usable}")
+    print("Tip: own Voice Design voices also work — pass --voice <voice_id>.")
+
+
+def synth_tone(path: Path, seconds: float = 2.0, sr: int = 16000) -> Path:
+    """Write a short sine tone (stdlib only) for --probe conversions."""
+    import math
+    n = int(seconds * sr)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(struct.pack(
+            "<" + "h" * n,
+            *[int(8000 * math.sin(2 * math.pi * 440 * i / sr)) for i in range(n)]))
+    return path
+
+
+def cmd_probe(api_key: str, model: str) -> None:
+    """One real ~2s conversion per configured voice (costs a few credits each)."""
+    if not api_key:
+        sys.exit("Probe needs an API key: set ELEVENLABS_API_KEY in .env.")
+    tmpdir = Path(tempfile.mkdtemp(prefix="voice_probe_"))
+    tone = synth_tone(tmpdir / "probe.wav")
+    for name, vid in VOICES.items():
+        print(f"[probe] {name} ({vid}) ...")
+        try:
+            out = sts_convert(tone, vid, api_key, model)
+            print(f"  OK: {len(out)} bytes back (no file saved)")
+        except SystemExit as e:
+            print(f"  FAIL: {e}")
 
 
 def list_voices(api_key: str) -> None:
@@ -434,19 +443,15 @@ def main() -> None:
     ap.add_argument("--input", type=Path, default=None, help="existing audio file")
     ap.add_argument("--output", type=Path, default=Path("voice_out.wav"))
     ap.add_argument("--voice", default=None,
-                    help="voice name (Rachel/Clyde/...), raw voice_id, "
-                         "or $CLONED_VOICE_ID if set (default: cloned id, else Rachel)")
-    ap.add_argument("--clone-voice", default=None, metavar="NAME",
-                    help="create an Instant Voice Clone called NAME from "
-                         "--clone-samples, print + save its voice_id")
-    ap.add_argument("--clone-samples", nargs="+", type=Path, default=[],
-                    metavar="SAMPLE",
-                    help="1+ sample files for --clone-voice (~1-3 min clear speech total)")
-    ap.add_argument("--clone-description", default="",
-                    help="optional description stored with the cloned voice")
+                    help="voice name (george/sarah), raw voice_id, "
+                         "or $ELEVENLABS_VOICE_ID if set (default: george)")
+    ap.add_argument("--check", action="store_true",
+                    help="read-only diagnosis: plan, credits, model, voice usability (no credits spent)")
+    ap.add_argument("--probe", action="store_true",
+                    help="one real ~2s conversion per voice (costs a few credits each)")
     ap.add_argument("--api-key", default=os.getenv("ELEVENLABS_API_KEY", ""),
                     help="ElevenLabs key (or $ELEVENLABS_API_KEY / .env)")
-    ap.add_argument("--model", default="eleven_english_sts_v2")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--mock", action="store_true",
                     help="offline pitch-shift demo, no key needed")
     ap.add_argument("--mock-pitch", type=float, default=5.0, metavar="SEMI",
@@ -457,30 +462,20 @@ def main() -> None:
     ap.add_argument("--sr", type=int, default=16000)
     args = ap.parse_args()
 
-    if args.clone_voice:
-        if not args.clone_samples:
-            print("--clone-voice needs --clone-samples FILE [FILE ...] "
-                  "(~1-3 min clear single-speaker speech, with their permission).",
-                  file=sys.stderr)
-            sys.exit(2)
-        if not args.api_key:
-            sys.exit("Cloning needs an API key: set ELEVENLABS_API_KEY in .env.")
-        print(f"[clone] creating Instant Voice Clone '{args.clone_voice}' "
-              f"from {len(args.clone_samples)} sample(s) ...")
-        vid = clone_voice(args.clone_voice, args.clone_samples,
-                          args.api_key, args.clone_description)
-        print(f"[clone] voice_id: {vid}")
-        save_cloned_voice_env(vid)
-        print("Use it: uv run voice_transformer.py --input <audio> "
-              f"--voice {vid} --output voice_out.mp3")
+    if args.check:
+        cmd_check(args.api_key)
         return
 
-    # Default voice: explicit --voice > saved clone > Rachel (stock needs paid key).
-    voice = args.voice or os.getenv("CLONED_VOICE_ID", "") or "Rachel"
+    if args.probe:
+        cmd_probe(args.api_key, args.model)
+        return
+
+    # Default voice: explicit --voice > $ELEVENLABS_VOICE_ID > george (free-tier safe).
+    voice = args.voice or os.getenv("ELEVENLABS_VOICE_ID", "") or "george"
 
     if args.list_voices:
         if not args.api_key:
-            print("Known stock voices (no key needed to list these):")
+            print("Free-tier-safe voices (no key needed to list these):")
             for k, v in VOICES.items():
                 print(f"  {k} -> {v}")
             print("\nFor your full account list: pass --api-key KEY --list-voices")
@@ -521,19 +516,21 @@ def main() -> None:
         sys.exit(f"{src} is not .wav and ffmpeg is missing to convert it.")
 
     # ---- convert ----
-    out_wav = tmpdir / "converted.wav"
     if args.mock or not args.api_key:
         if args.api_key == "" and not args.mock:
             print("[info] no API key → using --mock offline demo. "
                   "Set ELEVENLABS_API_KEY for the real AI voice.")
-        mock_transform(src_wav, out_wav, args.mock_pitch)
+        out_raw = tmpdir / "converted.wav"
+        mock_transform(src_wav, out_raw, args.mock_pitch)
     else:
         vid = resolve_voice(voice)
         print(f"[sts] converting via ElevenLabs voice '{voice}' ({vid}) ...")
-        audio_bytes = sts_convert(src_wav, vid, args.api_key, args.model)
-        out_wav.write_bytes(audio_bytes)
+        # STS returns MP3 (output_format=mp3_44100_128); keep its own suffix
+        # so finalize/playback handle it correctly.
+        out_raw = tmpdir / "converted.mp3"
+        out_raw.write_bytes(sts_convert(src_wav, vid, args.api_key, args.model))
 
-    final = finalize_output(out_wav, args.output)
+    final = finalize_output(out_raw, args.output)
     print(f"[done] saved {final} ({final.stat().st_size} bytes)")
     if args.play:
         print("[play] playing back ...")

@@ -46,28 +46,29 @@ Video parsing is recursive, not just top-level:
 ## Task 4 — voice transformer
 
 ```bash
-uv run voice_transformer.py --record 5 --voice Rachel --mock --play   # offline demo, no key
-uv run voice_transformer.py --input media/audio_sophisticated.ogg --mock --play
-uv run voice_transformer.py --record 5 --voice <voice_id>             # real AI voice (needs key)
-uv run voice_transformer.py --input myvoice.wav --voice <voice_id> --output voice_out.mp3
-uv run voice_transformer.py --list-voices                             # stock IDs work without a key
+uv run voice_transformer.py --check       # key, plan, credits, voice check (read-only, free)
+uv run voice_transformer.py --record 5 --voice george --mock --play   # offline demo, no key
+uv run voice_transformer.py --input media/audio_sophisticated.ogg --voice george --play
+uv run voice_transformer.py --input myvoice.wav --voice sarah --output voice_out.mp3
+uv run voice_transformer.py --list-voices
+uv run voice_transformer.py --probe       # one real ~2s conversion per voice (few credits each)
 ```
 
 - **Modes:** real = ElevenLabs speech-to-speech (`POST /v1/speech-to-speech/{voice_id}`,
-  keeps your prosody); `--mock` = local pitch-shift so the demo never blocks on key/quota.
-- **Free-tier limitation:** stock voices (Rachel, Clyde, …) are blocked via API on free
-  accounts ("library voices" error). Workaround — clone once, reuse forever:
-  ```bash
-  # 1–3 min of clear single-speaker speech, with their permission to clone
-  uv run voice_transformer.py --clone-voice myfriend --clone-samples friend1.mp3 [friend2.mp3 ...]
-  # prints a voice_id and saves it as CLONED_VOICE_ID in .env, then:
-  uv run voice_transformer.py --input media/audio_sophisticated.ogg --voice <voice_id> --output voice_out.mp3
-  ```
-  Cloned/design voices *are* usable via API on free tier; `--voice` defaults to
-  `$CLONED_VOICE_ID` when set. `--list-voices` with a key shows your full account list.
+  `eleven_multilingual_sts_v2`, keeps your prosody); `--mock` = local pitch-shift
+  so the demo never blocks on key/quota.
+- **Free-tier voices (this is the step that trips people up):** only current built-in
+  defaults (`george` deeper, `sarah` brighter) and your own Voice Design voices work
+  via API on free accounts. Legacy/library voices (Rachel, Clyde, Bella, …) fail with
+  "Free users cannot use library voices". Generate custom voices at
+  elevenlabs.io → Voices → Voice Design (free, a few slots), then
+  `--voice <voice_id>` or `ELEVENLABS_VOICE_ID` in `.env`.
+- **Quota:** ~10k credits/month ≈ 10 min STS. ` --check` shows remaining credits;
+  failed (4xx) requests don't consume credits.
 - **Mic:** auto-chain sounddevice → `pw-record` (PipeWire) → ffmpeg-pulse; any input
-  format (wav/mp3/m4a/ogg) is normalized to wav before conversion; output is mp3 if
-  `ffmpeg` exists, else wav. No mic? Record on phone/browser and pass `--input`.
+  format (wav/mp3/m4a/ogg) is normalized to wav before conversion; STS returns MP3,
+  re-encoded to `--output` (mp3 if `ffmpeg` exists, else wav). No mic? Record on
+  phone/browser and pass `--input`.
 - Key resolution order: `--api-key` flag → `$ELEVENLABS_API_KEY` → `.env` → mock with a notice.
 
 ## Task 5 — task pipe (photo fix + OCR)
