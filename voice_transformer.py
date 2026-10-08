@@ -8,6 +8,11 @@ Usage (shared venv, see README):
     uv run voice_transformer.py --list-voices
     uv run voice_transformer.py --record 5 --voice Rachel   # real ElevenLabs STS (needs key)
 
+Free-tier note: stock voices (Rachel, Clyde, …) are blocked via API on free
+accounts. Clone a voice once (allowed on free tier), then use its voice_id:
+    uv run voice_transformer.py --clone-voice myfriend --clone-samples friend1.mp3
+    uv run voice_transformer.py --input media/audio_sophisticated.ogg --voice <voice_id>
+
 Input:  mic (--record SECS) or existing file (--input FILE).
 Output: converted audio (--output FILE) + optional playback (--play, default on).
 
@@ -86,15 +91,21 @@ def have(cmd: str) -> bool:
 # --------------------------------------------------------------------------
 def record_sounddevice(path: Path, seconds: float, sr: int = 16000) -> bool:
     try:
-        import sounddevice as sd  # optional, not in base deps
+        import sounddevice as sd  # optional; needs PortAudio system lib
         import numpy as np
-    except ImportError:
+    except (ImportError, OSError) as e:
+        print(f"[record] sounddevice unavailable ({e.__class__.__name__}), "
+              "trying next method ...")
         return False
     import numpy as np
 
     print(f"[record] mic via sounddevice: {seconds:.0f}s @ {sr}Hz ... speak now")
-    audio = sd.rec(int(seconds * sr), samplerate=sr, channels=1, dtype="int16")
-    sd.wait()
+    try:
+        audio = sd.rec(int(seconds * sr), samplerate=sr, channels=1, dtype="int16")
+        sd.wait()
+    except Exception as e:
+        print(f"[record] sounddevice capture failed ({e}), trying next method ...")
+        return False
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -102,6 +113,27 @@ def record_sounddevice(path: Path, seconds: float, sr: int = 16000) -> bool:
         w.writeframes(audio.tobytes())
     print(f"[record] saved {path}")
     return True
+
+
+def record_pw_record(path: Path, seconds: float, sr: int = 16000) -> bool:
+    """Native PipeWire recorder (no PortAudio/ALSA tools needed)."""
+    if not have("pw-record") or not have("timeout"):
+        return False
+    cmd = ["timeout", str(seconds),
+           "pw-record", "--rate", str(sr), "--channels", "1", str(path)]
+    print(f"[record] mic via pw-record: {seconds:.0f}s @ {sr}Hz ... speak now")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    # `timeout` kills pw-record after N secs -> exit code 124 = success here.
+    if r.returncode in (0, 124) and path.exists() and path.stat().st_size > 44:
+        print(f"[record] saved {path}")
+        return True
+    print("[record] pw-record capture failed (no mic source?). "
+          "Trying next method ...", file=sys.stderr)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
 
 
 def record_ffmpeg(path: Path, seconds: float, sr: int = 16000) -> bool:
@@ -128,11 +160,16 @@ def record_ffmpeg(path: Path, seconds: float, sr: int = 16000) -> bool:
 def do_record(out: Path, seconds: float, sr: int) -> Path:
     if record_sounddevice(out, seconds, sr):
         return out
+    if record_pw_record(out, seconds, sr):
+        return out
     if record_ffmpeg(out, seconds, sr):
         return out
     raise SystemExit(
-        "Could not record: install sounddevice (pip) or ffmpeg with mic access,\n"
-        "or skip the mic:  uv run voice_transformer.py --input myvoice.wav --mock"
+        "Could not record from mic (tried sounddevice, pw-record, ffmpeg).\n"
+        "Options:\n"
+        "  - record on your phone/browser and pass it in:\n"
+        "      uv run voice_transformer.py --input recording.m4a --mock\n"
+        "  - check a mic is plugged in and visible to PipeWire (pw-record --list-targets)"
     )
 
 
@@ -202,6 +239,26 @@ def mock_transform(src: Path, dst_wav: Path, semitones: float = 5.0) -> Path:
 # --------------------------------------------------------------------------
 # ElevenLabs speech-to-speech (stdlib only — no SDK needed)
 # --------------------------------------------------------------------------
+def _multipart_body(fields: dict, files: list[tuple[str, Path, str]],
+                    boundary: str) -> bytes:
+    """Build multipart/form-data body. fields: name->text, files: (field, path, mime)."""
+    body = b""
+    for name, value in fields.items():
+        body += (f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                 f"{value}\r\n").encode()
+    for field, path, mime in files:
+        with open(path, "rb") as f:
+            data = f.read()
+        body += (f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="{field}"; '
+                 f'filename="{path.name}"\r\n'
+                 f"Content-Type: {mime}\r\n\r\n").encode()
+        body += data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return body
+
+
 def sts_convert(src: Path, voice_id: str, api_key: str,
                 model_id: str = "eleven_english_sts_v2") -> bytes:
     boundary = "----voicetransformer boundary"
@@ -238,8 +295,83 @@ def sts_convert(src: Path, voice_id: str, api_key: str,
                 pass
         except Exception:
             detail = str(e)
+        if "library voices" in detail.lower() or "not available for free" in detail.lower():
+            raise SystemExit(
+                f"ElevenLabs STS failed: {detail}\n\n"
+                "Free-tier keys cannot use stock/library voices (Rachel, Clyde, …) via API.\n"
+                "Workaround — clone a voice (allowed on free tier, usable via API):\n"
+                "  1. get 1-3 min of clear single-speaker speech (with their permission)\n"
+                "  2. uv run voice_transformer.py --clone-voice myfriend "
+                "--clone-samples friend1.mp3 [friend2.mp3 ...]\n"
+                "  3. use the printed voice_id with --voice, e.g.:\n"
+                "       uv run voice_transformer.py --input media/audio_sophisticated.ogg "
+                "--voice <voice_id> --output voice_out.mp3\n"
+                "Or demo offline now: add --mock."
+            )
         raise SystemExit(f"ElevenLabs STS failed: {detail or e}\n"
                          "Tip: check key/quota, or retry with --mock.")
+
+
+def clone_voice(name: str, samples: list[Path], api_key: str,
+                description: str = "") -> str:
+    """Create an Instant Voice Clone from 1+ sample files. Returns voice_id.
+
+    Needs ~1-3 min total of clear single-speaker speech (wav/mp3/m4a/ogg —
+    converted to 16kHz mono wav first). Works on the free tier; the returned
+    voice_id IS usable via API (unlike stock library voices).
+    """
+    import json
+
+    conv: list[Path] = []
+    tmpdir = Path(tempfile.mkdtemp(prefix="voice_clone_"))
+    for s in samples:
+        if not s.exists():
+            raise SystemExit(f"Sample not found: {s}")
+        dst = tmpdir / (s.stem + ".wav")
+        if s.suffix.lower() == ".wav":
+            shutil.copy(s, dst)
+        elif have("ffmpeg"):
+            r = subprocess.run(["ffmpeg", "-y", "-i", str(s),
+                                "-ar", "16000", "-ac", "1", str(dst)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise SystemExit(f"ffmpeg could not decode sample {s}")
+        else:
+            raise SystemExit(f"{s} is not .wav and ffmpeg is missing.")
+        conv.append(dst)
+
+    boundary = "----voicetransformer clone"
+    body = _multipart_body({"name": name, "description": description},
+                           [("files", p, "audio/wav") for p in conv], boundary)
+    req = urllib.request.Request(
+        f"{API_BASE}/voices/add",
+        data=body,
+        headers={"xi-api-key": api_key,
+                 "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            data = json.loads(r.read().decode())
+    except Exception as e:
+        try:
+            err = e.read().decode()  # type: ignore[attr-defined]
+        except Exception:
+            err = str(e)
+        raise SystemExit(f"Voice cloning failed: {err}")
+    vid = data.get("voice_id", "")
+    if not vid:
+        raise SystemExit(f"Voice cloning failed: unexpected response {data}")
+    return vid
+
+
+def save_cloned_voice_env(voice_id: str, path: Path = Path(".env")) -> None:
+    """Persist CLONED_VOICE_ID so later runs can default to it."""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    lines = [l for l in lines if not l.strip().startswith("CLONED_VOICE_ID=")]
+    lines.append(f"CLONED_VOICE_ID={voice_id}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[clone] saved CLONED_VOICE_ID to {path}")
 
 
 def list_voices(api_key: str) -> None:
@@ -301,8 +433,17 @@ def main() -> None:
                     help="record SECS seconds from mic")
     ap.add_argument("--input", type=Path, default=None, help="existing audio file")
     ap.add_argument("--output", type=Path, default=Path("voice_out.wav"))
-    ap.add_argument("--voice", default="Rachel",
-                    help="voice name (Rachel/Clyde/...) or raw voice_id")
+    ap.add_argument("--voice", default=None,
+                    help="voice name (Rachel/Clyde/...), raw voice_id, "
+                         "or $CLONED_VOICE_ID if set (default: cloned id, else Rachel)")
+    ap.add_argument("--clone-voice", default=None, metavar="NAME",
+                    help="create an Instant Voice Clone called NAME from "
+                         "--clone-samples, print + save its voice_id")
+    ap.add_argument("--clone-samples", nargs="+", type=Path, default=[],
+                    metavar="SAMPLE",
+                    help="1+ sample files for --clone-voice (~1-3 min clear speech total)")
+    ap.add_argument("--clone-description", default="",
+                    help="optional description stored with the cloned voice")
     ap.add_argument("--api-key", default=os.getenv("ELEVENLABS_API_KEY", ""),
                     help="ElevenLabs key (or $ELEVENLABS_API_KEY / .env)")
     ap.add_argument("--model", default="eleven_english_sts_v2")
@@ -315,6 +456,27 @@ def main() -> None:
     ap.add_argument("--no-play", dest="play", action="store_false")
     ap.add_argument("--sr", type=int, default=16000)
     args = ap.parse_args()
+
+    if args.clone_voice:
+        if not args.clone_samples:
+            print("--clone-voice needs --clone-samples FILE [FILE ...] "
+                  "(~1-3 min clear single-speaker speech, with their permission).",
+                  file=sys.stderr)
+            sys.exit(2)
+        if not args.api_key:
+            sys.exit("Cloning needs an API key: set ELEVENLABS_API_KEY in .env.")
+        print(f"[clone] creating Instant Voice Clone '{args.clone_voice}' "
+              f"from {len(args.clone_samples)} sample(s) ...")
+        vid = clone_voice(args.clone_voice, args.clone_samples,
+                          args.api_key, args.clone_description)
+        print(f"[clone] voice_id: {vid}")
+        save_cloned_voice_env(vid)
+        print("Use it: uv run voice_transformer.py --input <audio> "
+              f"--voice {vid} --output voice_out.mp3")
+        return
+
+    # Default voice: explicit --voice > saved clone > Rachel (stock needs paid key).
+    voice = args.voice or os.getenv("CLONED_VOICE_ID", "") or "Rachel"
 
     if args.list_voices:
         if not args.api_key:
@@ -366,8 +528,8 @@ def main() -> None:
                   "Set ELEVENLABS_API_KEY for the real AI voice.")
         mock_transform(src_wav, out_wav, args.mock_pitch)
     else:
-        vid = resolve_voice(args.voice)
-        print(f"[sts] converting via ElevenLabs voice '{args.voice}' ({vid}) ...")
+        vid = resolve_voice(voice)
+        print(f"[sts] converting via ElevenLabs voice '{voice}' ({vid}) ...")
         audio_bytes = sts_convert(src_wav, vid, args.api_key, args.model)
         out_wav.write_bytes(audio_bytes)
 

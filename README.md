@@ -34,21 +34,40 @@ make run FILE=media/mp4/animated.mp4
 Parsers live in `main.c` (`parse_bmp`, `parse_png`, `parse_jpeg`, `parse_wav`,
 `parse_mp3`, `parse_mp4`, `parse_avi`). Samples under `media/`.
 
+Video parsing is recursive, not just top-level:
+- **MP4:** full box tree (`moov/trak/mdia/minf/stbl`, fragments `moof/traf`, `mvex`, `mfra`);
+  `mvhd` timescale/duration + creation time, `mehd` fragment duration (fragmented files),
+  `tkhd` track dims, `mdhd` language, `hdlr` handler names, `stsd` codecs
+  (`avc1` 640×480, `mp4a` 2ch/44100Hz, …), and `meta/ilst` tags
+  (title, artist, encoder, GPS `©xyz`) — both spec and locale-less `data` layouts.
+- **AVI:** `avih` (fps, frames, dims), per-stream `strh` (type, codec, fps/length) and
+  `strf` (`BITMAPINFOHEADER` / `WAVEFORMATEX`); `movi` bodies are skipped by size.
+
 ## Task 4 — voice transformer
 
 ```bash
 uv run voice_transformer.py --record 5 --voice Rachel --mock --play   # offline demo, no key
-uv run voice_transformer.py --record 5 --voice Rachel                 # real AI voice (needs key)
-uv run voice_transformer.py --input myvoice.wav --voice Clyde --output voice_out.mp3
+uv run voice_transformer.py --input media/audio_sophisticated.ogg --mock --play
+uv run voice_transformer.py --record 5 --voice <voice_id>             # real AI voice (needs key)
+uv run voice_transformer.py --input myvoice.wav --voice <voice_id> --output voice_out.mp3
 uv run voice_transformer.py --list-voices                             # stock IDs work without a key
 ```
 
 - **Modes:** real = ElevenLabs speech-to-speech (`POST /v1/speech-to-speech/{voice_id}`,
   keeps your prosody); `--mock` = local pitch-shift so the demo never blocks on key/quota.
-- **Voices:** name (`Rachel`, `Clyde`, `Domi`, `Bella`, `Antoni`, `Elli`, `Josh`,
-  `Arnold`, `Adam`, `Sam`) or a raw `voice_id`. `--list-voices` with a key shows your full account list.
-- **Audio:** mic via `sounddevice`, auto-fallback to `ffmpeg` (pulse/alsa); any input
-  format is normalized to wav before conversion; output is mp3 if `ffmpeg` exists, else wav.
+- **Free-tier limitation:** stock voices (Rachel, Clyde, …) are blocked via API on free
+  accounts ("library voices" error). Workaround — clone once, reuse forever:
+  ```bash
+  # 1–3 min of clear single-speaker speech, with their permission to clone
+  uv run voice_transformer.py --clone-voice myfriend --clone-samples friend1.mp3 [friend2.mp3 ...]
+  # prints a voice_id and saves it as CLONED_VOICE_ID in .env, then:
+  uv run voice_transformer.py --input media/audio_sophisticated.ogg --voice <voice_id> --output voice_out.mp3
+  ```
+  Cloned/design voices *are* usable via API on free tier; `--voice` defaults to
+  `$CLONED_VOICE_ID` when set. `--list-voices` with a key shows your full account list.
+- **Mic:** auto-chain sounddevice → `pw-record` (PipeWire) → ffmpeg-pulse; any input
+  format (wav/mp3/m4a/ogg) is normalized to wav before conversion; output is mp3 if
+  `ffmpeg` exists, else wav. No mic? Record on phone/browser and pass `--input`.
 - Key resolution order: `--api-key` flag → `$ELEVENLABS_API_KEY` → `.env` → mock with a notice.
 
 ## Task 5 — task pipe (photo fix + OCR)
