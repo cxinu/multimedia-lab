@@ -53,3 +53,23 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# uv / python
+.venv/
+uv.lock
+__pycache__/
+
+# secrets (see .env.example)
+.env
+
+# generated outputs
+task_pipe_out/
+voice_out*.wav
+voice_out*.mp3
+fixed_*.jpg
+
+# C build artifact
+media_analyzer
+
+# media
+media/
